@@ -17,6 +17,7 @@
 #include <IndexDefines.H>
 #include <DataStruct.H>
 #include <EddyViscosity.H>
+#include <PBLModels.H>
 #include <ABLMost.H>
 
 using PlaneVector = amrex::Vector<amrex::FArrayBox>;
@@ -60,13 +61,22 @@ public:
                 const auto& cons_mf = m_data.get_var(Vars::cons);
                 m_viscosity.define(cons_mf.boxArray(), cons_mf.DistributionMap(), EddyDiff::NumDiffs, cons_mf.nGrowVect());
                 AMREX_ALWAYS_ASSERT_WITH_MESSAGE(solverChoice.les_type == LESType::Smagorinsky ||
-                                                 solverChoice.les_type == LESType::Deardorff,
-                                                 "Must use an LES model to compute turbulent viscosity for MOST boundaries");
-                ComputeTurbulentViscosity(m_data.get_var(Vars::xvel),
-                                          m_data.get_var(Vars::yvel),
-                                          m_data.get_var(Vars::zvel),
-                                          cons_mf, m_viscosity, geom, solverChoice,
-                                          domain_bcs_type_d);
+                                                 solverChoice.les_type == LESType::Deardorff ||,
+                                                 solverChoice.pbl_type != PBLType::None,
+                                                 "Must use an LES or PBL model to compute turbulent viscosity for MOST boundaries");
+		// PBL or PBL+LES - get vertical viscosity component with PBL model. LES - get it with LES model
+		if (solverChoice.pbl_type != PBLType::None) {
+		  ComputeTurbulentViscosityPBL(m_data.get_var(Vars::xvel),
+					       m_data.get_var(Vars::yvel),
+					       m_data.get_var(Vars::zvel),
+					       cons_mf, m_viscosity, geom, solverChoice, m_most);
+		} else {
+		  ComputeTurbulentViscosity(m_data.get_var(Vars::xvel),
+					    m_data.get_var(Vars::yvel),
+					    m_data.get_var(Vars::zvel),
+					    cons_mf, m_viscosity, geom, solverChoice,
+					    domain_bcs_type_d);
+		}
             }
         }
 
@@ -337,9 +347,7 @@ public:
                                 vely  = 0.5*(vely_arr(iy,jy,zlo)+vely_arr(iy,jy+1,zlo));
                                 rho   = cons_arr(ie,je,zlo,Rho_comp);
                                 theta = cons_arr(ie,je,zlo,RhoTheta_comp)/rho;
-
-                                // TODO: Verify this is the correct Diff component
-                                eta   = eta_arr(ie,je,zlo,EddyDiff::Mom_h);
+                                eta   = eta_arr(ie,je,zlo,EddyDiff::Theta_v);
 
                                 Real vmag    = sqrt(velx*velx+vely*vely);
                                 Real num1    = (theta-m_most.theta_mean)*m_most.vmag_mean;
