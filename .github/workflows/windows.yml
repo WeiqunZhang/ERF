@@ -25,12 +25,12 @@ jobs:
 
     - name: Install Ccache
       run: |
-        Set-ExecutionPolicy Bypass -Scope Process -Force; iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))
         choco install ccache
         echo "C:\Program Files\ccache" >> $env:GITHUB_PATH
 
     - name: Configure Project and Generate Build System
       run: |
+        Get-Command ccache
         cmake -S . -B build `
           -DCMAKE_INSTALL_PREFIX:PATH=${{runner.workspace}}/ERF/install `
           -DCMAKE_BUILD_TYPE:STRING=Debug `
