@@ -22,13 +22,14 @@ jobs:
         key: ccache-${{ github.workflow }}-${{ github.job }}-git-${{ github.sha }}
         restore-keys: |
              ccache-${{ github.workflow }}-${{ github.job }}-git-
+
     - name: Install Ccache
-      run: |
-        Invoke-WebRequest https://github.com/ccache/ccache/releases/download/v4.10/ccache-4.10-windows-x86_64.zip -OutFile ccache-4.10-windows-x86_64.zip
-        Expand-Archive ccache-4.10-windows-x86_64.zip
+      uses: crazy-max/ghaction-chocolatey@v3
+      run: choco install ccache
 
     - name: Configure Project and Generate Build System
       run: |
+        echo "C:\Program Files\ccache" >> $env:GITHUB_PATH
         cmake -S . -B build `
           -DCMAKE_INSTALL_PREFIX:PATH=${{runner.workspace}}/ERF/install `
           -DCMAKE_BUILD_TYPE:STRING=Debug `
@@ -42,9 +43,7 @@ jobs:
 
     - name: Compile and Link
       run: |
-        $ccachepath = Join-Path $pwd "ccache-4.10-windows-x86_64"
-        $Env:PATH += ";$ccachepath"
-        $ccachecachedir = Join-Path $HOME ".ccache"
+        echo "C:\Program Files\ccache" >> $env:GITHUB_PATH
         $Env:CCACHE_DIR="$ccachecachedir"
         $Env:CCACHE_COMPRESS='1'
         $Env:CCACHE_COMPRESSLEVEL='10'
