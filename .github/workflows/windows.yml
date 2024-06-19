@@ -44,6 +44,7 @@ jobs:
       run: |
         $ccachepath = Join-Path $pwd "ccache-4.10-windows-x86_64"
         $Env:PATH += ";$ccachepath"
+        echo "C:\Program Files\ccache" >> $env:GITHUB_PATH
         $ccachecachedir = Join-Path $HOME ".ccache"
         $Env:CCACHE_DIR="$ccachecachedir"
         $Env:CCACHE_COMPRESS='1'
