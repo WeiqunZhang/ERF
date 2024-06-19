@@ -22,10 +22,12 @@ jobs:
         key: ccache-${{ github.workflow }}-${{ github.job }}-git-${{ github.sha }}
         restore-keys: |
              ccache-${{ github.workflow }}-${{ github.job }}-git-
+
     - name: Install Ccache
       run: |
-        Invoke-WebRequest https://github.com/ccache/ccache/releases/download/v4.10/ccache-4.10-windows-x86_64.zip -OutFile ccache-4.10-windows-x86_64.zip
-        Expand-Archive ccache-4.10-windows-x86_64.zip
+        Set-ExecutionPolicy Bypass -Scope Process -Force; iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))
+        choco install ccache
+        echo "C:\Program Files\ccache" >> $env:GITHUB_PATH
 
     - name: Configure Project and Generate Build System
       run: |
@@ -42,9 +44,6 @@ jobs:
 
     - name: Compile and Link
       run: |
-        $ccachepath = Join-Path $pwd "ccache-4.10-windows-x86_64"
-        $Env:PATH += ";$ccachepath"
-        echo "C:\Program Files\ccache" >> $env:GITHUB_PATH
         $ccachecachedir = Join-Path $HOME ".ccache"
         $Env:CCACHE_DIR="$ccachecachedir"
         $Env:CCACHE_COMPRESS='1'
