@@ -1090,9 +1090,9 @@ private:
     bool        metgrid_use_below_sfc{true};
     bool        metgrid_use_sfc{true};
     bool        metgrid_retain_sfc{false};
-    amrex::Real metgrid_proximity{1000.0};
+    amrex::Real metgrid_proximity{500.0};
     int         metgrid_order{2};
-    int         metgrid_force_sfc_k{0};
+    int         metgrid_force_sfc_k{6};
 
     // 1D CDF output (for ingestion in AMR-Wind)
     static int         output_1d_column;
