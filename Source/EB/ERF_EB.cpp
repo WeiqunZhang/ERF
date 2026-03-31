@@ -43,29 +43,29 @@ eb_::make_all_factories ([[maybe_unused]] int level,
     // Correct cell connectivity
     eb_::set_connection_flags();
 
-    { int const idim(0);
-        Print() << "making EB staggered u-factory\n";
-        //m_u_factory.set_verbose();
-        m_u_factory.define(level, idim, a_geom, ba, dm,
-            Vector<int>{nghost_basic(), nghost_volume(), nghost_full()},
-            m_factory.get());
-    }
+    auto build_stag_factory =
+        [this,level,&a_geom,&ba,&dm](int idim, eb_aux_& target, const char* label)
+    {
+        Print() << "making EB staggered " << label << "-factory\n";
+        if (m_use_amrex_staggered) {
+            const EBStaggeredData* stag = m_factory->getStaggeredData(idim);
+            if (stag != nullptr) {
+                target.alias(*stag, idim, a_geom, ba, dm,
+                             Vector<int>{nghost_basic(), nghost_volume(), nghost_full()},
+                             m_factory.get());
+                return;
+            } else {
+                Print() << "  (no AMReX staggered data available; falling back to legacy eb_aux_ build)\n";
+            }
+        }
+        target.define(level, idim, a_geom, ba, dm,
+                      Vector<int>{nghost_basic(), nghost_volume(), nghost_full()},
+                      m_factory.get());
+    };
 
-    { int const idim(1);
-        Print() << "making EB staggered v-factory\n";
-        //m_v_factory.set_verbose();
-        m_v_factory.define(level, idim, a_geom, ba, dm,
-            Vector<int>{nghost_basic(), nghost_volume(), nghost_full()},
-            m_factory.get());
-    }
-
-    { int const idim(2);
-        Print() << "making EB staggered w-factory\n";
-        //m_w_factory.set_verbose();
-        m_w_factory.define(level, idim, a_geom, ba, dm,
-            Vector<int>{nghost_basic(), nghost_volume(), nghost_full()},
-            m_factory.get());
-    }
+    build_stag_factory(0, m_u_factory, "u");
+    build_stag_factory(1, m_v_factory, "v");
+    build_stag_factory(2, m_w_factory, "w");
     Print() << "\nDone making EB factory at level = " << level << ".\n\n";
 }
 

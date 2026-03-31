@@ -22,6 +22,17 @@ class eb_aux_
                   amrex::DistributionMapping const& a_dmap,
                   amrex::Vector<int>         const& a_ngrow,
                   amrex::EBFArrayBoxFactory  const* a_factory);
+    void alias (const amrex::EBStaggeredData& stag,
+                int const& a_idim,
+                amrex::Geometry const& a_geom,
+                amrex::BoxArray const& a_grids,
+                amrex::DistributionMapping const& a_dmap,
+                amrex::Vector<int> const& a_ngrow,
+                amrex::EBFArrayBoxFactory const* a_factory = nullptr);
+    void copy_from (const eb_aux_& src);
+    void copy_boundary_from (const eb_aux_& src,
+                             int const& a_idim,
+                             amrex::Geometry const& a_geom);
 
     void set_verbose ( ) { m_verbose = 1; }
 
@@ -50,6 +61,10 @@ class eb_aux_
 
     amrex::Array<amrex::MultiFab*,AMREX_SPACEDIM> m_areafrac {{AMREX_D_DECL(nullptr, nullptr, nullptr)}};
     amrex::Array<amrex::MultiFab*,AMREX_SPACEDIM> m_facecent {{AMREX_D_DECL(nullptr, nullptr, nullptr)}};
+    bool m_alias_data = false;
+    const amrex::EBStaggeredData* m_stag_ref = nullptr;
+    void apply_legacy_postprocessing (int const& a_idim,
+                                      amrex::Geometry const& a_geom);
     // amrex::Array<amrex::MultiCutFab*,AMREX_SPACEDIM> m_edgecent {{AMREX_D_DECL(nullptr, nullptr, nullptr)}};
 
 };

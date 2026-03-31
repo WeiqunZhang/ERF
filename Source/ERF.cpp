@@ -236,6 +236,8 @@ ERF::ERF_shared ()
     // This is only used when we have mesh_type == MeshType::StretchedDz
     stretched_dz_h.resize(nlevs_max);
     stretched_dz_d.resize(nlevs_max);
+    terrain_height_fab.resize(max_level+1);
+    building_height_fab.resize(max_level+1);
 
     // Initialize staggered vertical levels for grid stretching or terrain, and
     // to simplify Rayleigh damping layer calculations.
@@ -499,6 +501,7 @@ ERF::ERF_shared ()
     eb.resize(max_level+1);
     for (int lev = 0; lev < max_level + 1; lev++){
         eb[lev] = std::make_unique<eb_>();
+        eb[lev]->set_use_amrex_staggered(m_use_amrex_staggered_eb);
     }
 
     //
@@ -524,7 +527,9 @@ ERF::ERF_shared ()
         // Define GeometryShop using the implicit function
         if (geometry == "terrain") {
             Box terrain_bx(surroundingNodes(geom[max_level].Domain())); terrain_bx.grow(3);
-            FArrayBox terrain_fab(makeSlab(terrain_bx,2,0),1);
+            terrain_height_fab[max_level] =
+                std::make_unique<FArrayBox>(makeSlab(terrain_bx,2,0),1);
+            FArrayBox& terrain_fab = *terrain_height_fab[max_level];
             Real dummy_time = zero;
             prob->init_terrain_surface(geom[max_level], terrain_fab, dummy_time);
             TerrainIF implicit_fun(terrain_fab, geom[max_level], stretched_dz_d[max_level]);
@@ -581,7 +586,9 @@ ERF::ERF_shared ()
     if ( solverChoice.buildings_type == BuildingsType::ImmersedForcing) {
         constexpr int ngrow_for_eb = 4;
         Box buildings_bx(surroundingNodes(geom[max_level].Domain())); buildings_bx.grow(3);
-        FArrayBox buildings_fab(makeSlab(buildings_bx,2,0),1);
+        building_height_fab[max_level] =
+            std::make_unique<FArrayBox>(makeSlab(buildings_bx,2,0),1);
+        FArrayBox& buildings_fab = *building_height_fab[max_level];
         Real dummy_time = zero;
         prob->init_buildings_surface(geom[max_level], buildings_fab, dummy_time);
         TerrainIF implicit_fun(buildings_fab, geom[max_level], stretched_dz_d[max_level]);
@@ -2322,6 +2329,7 @@ ERF::ReadParameters ()
         pp.query("v", verbose);
         pp.query("mg_v", mg_verbose);
         pp.query("use_fft", use_fft);
+        pp.query("use_amrex_staggered_eb", m_use_amrex_staggered_eb);
 #ifndef ERF_USE_FFT
         if (use_fft) {
             Abort("You must build with USE_FFT in order to set use_fft = true in your inputs file");

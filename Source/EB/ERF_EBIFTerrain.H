@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <limits>
 
 // For all implicit functions, >0: body; =0: boundary; <0: fluid
 
@@ -18,6 +19,7 @@ public:
                amrex::Gpu::DeviceVector<amrex::Real>& a_dz_stretched)
         : terr_arr(a_z_terrain.const_array()),
           dz_s(a_dz_stretched.data()),
+          ndz(static_cast<int>(a_dz_stretched.size())),
           dx(a_geom.CellSize(0)),
           dy(a_geom.CellSize(1)),
           dz(a_geom.CellSize(2)),
@@ -48,14 +50,21 @@ public:
         amrex::Real terr_z{amrex::Real(0.0)};
 
         // z_stretched
-        const int k1 = static_cast<int>(std::floor((z-prob_lo_z) / dz));
-        const amrex::Real z1 = prob_lo_z + k1*dz;
-        const amrex::Real remainder_z = (z - z1)/dz;
+        const amrex::Real top_z = prob_lo_z + dz*ndz;
+        const amrex::Real z_eff =
+            amrex::max(prob_lo_z,
+                       amrex::min(top_z - std::numeric_limits<amrex::Real>::epsilon(), z));
+        const int k1 = static_cast<int>(std::floor((z_eff-prob_lo_z) / dz));
+        const int k_idx = amrex::max(0, amrex::min(ndz-1, k1));
+        const amrex::Real z1 = prob_lo_z + static_cast<amrex::Real>(k_idx)*dz;
+        const amrex::Real remainder_z = amrex::max(amrex::Real(0.0),
+                                                   amrex::min(amrex::Real(1.0),
+                                                              (z_eff - z1)/dz));
         amrex::Real z_stretched = prob_lo_z;
-        for (int kk = 0; kk < k1; ++kk) {
+        for (int kk = 0; kk < k_idx; ++kk) {
             z_stretched += dz_s[kk];
         }
-        z_stretched += remainder_z * dz_s[k1];
+        z_stretched += remainder_z * dz_s[k_idx];
 
         // Interpolation (nine subregions of x-y plane)
         if        (x <= prob_lo_x && y <= prob_lo_y) {
@@ -120,6 +129,7 @@ public:
 protected:
     amrex::Array4<amrex::Real const> terr_arr;
     amrex::Real const* dz_s;
+    int ndz;
     amrex::Real dx, dy, dz;
     amrex::Real prob_lo_x, prob_lo_y, prob_lo_z;
     amrex::Real prob_hi_x, prob_hi_y;

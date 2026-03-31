@@ -38,6 +38,7 @@ class eb_ {
                         amrex::BoxArray            const& ba,
                         amrex::DistributionMapping const& dm,
                         amrex::EB2::Level const& a_eb_level);
+    void set_use_amrex_staggered (bool val) { m_use_amrex_staggered = val; }
 
     int nghost_basic () const  { return 5; } // nghost_eb_basic ()
     int nghost_volume () const { return 5; } // nghost_eb_volume ()
@@ -72,6 +73,7 @@ class eb_ {
     eb_aux_ m_u_factory;
     eb_aux_ m_v_factory;
     eb_aux_ m_w_factory;
+    bool m_use_amrex_staggered = false;
 
     void make_terrain (amrex::Geometry const& a_geom);
 

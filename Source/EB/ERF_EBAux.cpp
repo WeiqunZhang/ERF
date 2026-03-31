@@ -1,5 +1,6 @@
 #include <AMReX_BoxList.H>
 #include <AMReX_ParmParse.H>
+#include <AMReX_EBStaggeredData.H>
 #include <ERF_EBAux.H>
 #include <ERF_EBCutCell.H>
 #include <AMReX_MultiFabUtil.H>
@@ -19,6 +20,581 @@ eb_aux_ ()
   : m_verbose(0)
 // ,m_defined(0)
 {}
+
+void
+eb_aux_::
+alias (const EBStaggeredData& stag,
+       int const& a_idim,
+       Geometry const& a_geom,
+       BoxArray const& a_grids,
+       DistributionMapping const& a_dmap,
+       Vector<int> const& a_ngrow,
+       EBFArrayBoxFactory const* a_factory)
+{
+  m_alias_data = true;
+  m_stag_ref = &stag;
+  const IntVect vdim(IntVect::TheDimensionVector(a_idim));
+  BoxArray my_grids = amrex::convert(a_grids, vdim);
+
+  m_cellflags = new FabArray<EBCellFlagFab>(my_grids, a_dmap, 1, a_ngrow[0], MFInfo(),
+                                            DefaultFabFactory<EBCellFlagFab>());
+  m_volfrac = new MultiFab(my_grids, a_dmap, 1, a_ngrow[1], MFInfo(), FArrayBoxFactory());
+  m_volcent = new MultiFab(my_grids, a_dmap, AMREX_SPACEDIM, a_ngrow[2], MFInfo(), FArrayBoxFactory());
+  for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+      m_areafrac[idim] = new MultiFab(a_grids, a_dmap, 1, a_ngrow[1]+1, MFInfo(), FArrayBoxFactory());
+      m_facecent[idim] = new MultiFab(a_grids, a_dmap, AMREX_SPACEDIM-1, a_ngrow[2], MFInfo(), FArrayBoxFactory());
+  }
+  m_bndryarea = new MultiFab(my_grids, a_dmap, 1, a_ngrow[2], MFInfo(), FArrayBoxFactory());
+  m_bndrycent = new MultiFab(my_grids, a_dmap, AMREX_SPACEDIM, a_ngrow[2], MFInfo(), FArrayBoxFactory());
+  m_bndrynorm = new MultiFab(my_grids, a_dmap, AMREX_SPACEDIM, a_ngrow[2], MFInfo(), FArrayBoxFactory());
+
+  if (a_factory != nullptr) {
+      eb_aux_ legacy;
+      legacy.define(0, a_idim, a_geom, a_grids, a_dmap, a_ngrow, a_factory);
+      copy_from(legacy);
+      return;
+  }
+
+  auto const& src_flags = stag.getMultiEBCellFlagFab();
+  auto const& src_volfrac = stag.getVolFrac();
+  auto const& src_centroid = stag.getCentroid();
+  auto const& src_bndryarea = stag.getBndryArea();
+  auto const& src_bndrycent = stag.getBndryCent();
+  auto const& src_bndrynorm = stag.getBndryNormal();
+  auto src_area = stag.getAreaFracAligned();
+  auto src_face = stag.getFaceCentAligned();
+
+  for (MFIter mfi(*m_cellflags, false); mfi.isValid(); ++mfi) {
+      Box const& bx = (*m_cellflags)[mfi].box();
+      int const src_k = mfi.index();
+
+      auto const& dst_flag = m_cellflags->array(mfi);
+      auto const& src_flag = src_flags.const_array(src_k);
+
+      ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+      {
+          dst_flag(i,j,k) = src_flag(i,j,k);
+      });
+  }
+
+  for (MFIter mfi(*m_volfrac, false); mfi.isValid(); ++mfi) {
+      Box const& bx = (*m_volfrac)[mfi].box();
+      int const src_k = mfi.index();
+      auto const& dst_vfrac = m_volfrac->array(mfi);
+      auto const& src_vfrac = src_volfrac.const_array(src_k);
+
+      ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+      {
+          dst_vfrac(i,j,k) = src_vfrac(i,j,k);
+      });
+  }
+
+  for (MFIter mfi(*m_volcent, false); mfi.isValid(); ++mfi) {
+      Box const& bx = (*m_volcent)[mfi].box();
+      int const src_k = mfi.index();
+      auto const& dst_vcent = m_volcent->array(mfi);
+      auto const& src_vcent = src_centroid.const_array(src_k);
+      auto const& dst_barea = m_bndryarea->array(mfi);
+      auto const& src_barea = src_bndryarea.const_array(src_k);
+      auto const& dst_bcent = m_bndrycent->array(mfi);
+      auto const& src_bcent = src_bndrycent.const_array(src_k);
+      auto const& dst_bnorm = m_bndrynorm->array(mfi);
+      auto const& src_bnorm = src_bndrynorm.const_array(src_k);
+
+      ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+      {
+          dst_barea(i,j,k) = src_barea(i,j,k);
+      });
+
+      ParallelFor(bx, AMREX_SPACEDIM, [=] AMREX_GPU_DEVICE (int i, int j, int k, int n) noexcept
+      {
+          dst_vcent(i,j,k,n) = src_vcent(i,j,k,n);
+          dst_bcent(i,j,k,n) = src_bcent(i,j,k,n);
+          dst_bnorm(i,j,k,n) = src_bnorm(i,j,k,n);
+      });
+  }
+
+  for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+      m_areafrac[idim]->setVal(0.0);
+      m_facecent[idim]->setVal(0.0);
+
+      for (MFIter mfi(*m_areafrac[idim], false); mfi.isValid(); ++mfi) {
+          Box const& bx = (*m_areafrac[idim])[mfi].box();
+          int const src_k = mfi.index();
+          Box const& src_bx = (*src_area[idim])[src_k].box();
+          auto const& dst_afrac = m_areafrac[idim]->array(mfi);
+          auto const& src_afrac = src_area[idim]->const_array(src_k);
+
+          ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+          {
+              IntVect iv(AMREX_D_DECL(i,j,k));
+              if (src_bx.contains(iv)) {
+                  dst_afrac(i,j,k) = src_afrac(i,j,k);
+              }
+          });
+      }
+
+      for (MFIter mfi(*m_facecent[idim], false); mfi.isValid(); ++mfi) {
+          Box const& bx = (*m_facecent[idim])[mfi].box();
+          int const src_k = mfi.index();
+          Box const& src_face_bx = (*src_face[idim])[src_k].box();
+          auto const& dst_fcent = m_facecent[idim]->array(mfi);
+          auto const& src_fcent = src_face[idim]->const_array(src_k);
+          ParallelFor(bx, AMREX_SPACEDIM-1, [=] AMREX_GPU_DEVICE (int i, int j, int k, int n) noexcept
+          {
+              IntVect iv(AMREX_D_DECL(i,j,k));
+              if (src_face_bx.contains(iv)) {
+                  dst_fcent(i,j,k,n) = src_fcent(i,j,k,n);
+              }
+          });
+      }
+  }
+
+  apply_legacy_postprocessing(a_idim, a_geom);
+}
+
+void
+eb_aux_::
+apply_legacy_postprocessing (int const& a_idim,
+                             Geometry const& a_geom)
+{
+  Real small_volfrac = Real(1.e-14);
+  ParmParse pp("eb2");
+  pp.queryAdd("small_volfrac", small_volfrac);
+  const Real small_value = Real(1.e-15);
+
+  // The aliased staggered cache does not come in with legacy eb_aux_ zeroed ghost
+  // cells, so seed physical ghosts before any comparisons or FillBoundary calls.
+  m_volfrac->setBndry(0.0);
+  m_volcent->setBndry(0.0);
+  m_bndryarea->setBndry(0.0);
+  m_bndrycent->setBndry(0.0);
+  m_bndrynorm->setBndry(0.0);
+  for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+    m_areafrac[idim]->setBndry(0.0);
+    m_facecent[idim]->setBndry(0.0);
+  }
+
+  // Match the legacy eb_aux_ path before redistribution inspects ghost cells.
+  m_volfrac->FillBoundary(a_geom.periodicity());
+
+  for (MFIter mfi(*m_cellflags, false); mfi.isValid(); ++mfi) {
+
+    const Box& bx = mfi.validbox();
+    const Box& bx_grown = mfi.growntilebox();
+
+    Array4<EBCellFlag> const& aux_flag  = m_cellflags->array(mfi);
+    Array4<Real>       const& aux_vfrac = m_volfrac->array(mfi);
+    Array4<Real>       const& aux_afrac_x = m_areafrac[0]->array(mfi);
+    Array4<Real>       const& aux_afrac_y = m_areafrac[1]->array(mfi);
+    Array4<Real>       const& aux_afrac_z = m_areafrac[2]->array(mfi);
+
+    Array4<Real>       const& aux_vcent = m_volcent->array(mfi);
+    Array4<Real>       const& aux_fcent_x = m_facecent[0]->array(mfi);
+    Array4<Real>       const& aux_fcent_y = m_facecent[1]->array(mfi);
+    Array4<Real>       const& aux_fcent_z = m_facecent[2]->array(mfi);
+    Array4<Real>       const& aux_barea = m_bndryarea->array(mfi);
+    Array4<Real>       const& aux_bcent = m_bndrycent->array(mfi);
+    Array4<Real>       const& aux_bnorm = m_bndrynorm->array(mfi);
+
+    Box my_xbx(bx); my_xbx.growHi(0,1);
+    int xbx_lo = my_xbx.smallEnd(0);
+    int xbx_hi = my_xbx.bigEnd(0);
+    ParallelFor(my_xbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+    {
+      if ((i == xbx_lo && aux_vfrac(i,j,k) < small_volfrac) ||
+          (i == xbx_hi && aux_vfrac(i-1,j,k) < small_volfrac) ||
+          (i > xbx_lo && i < xbx_hi &&
+          (aux_vfrac(i,j,k) < small_volfrac || aux_vfrac(i-1,j,k) < small_volfrac))) {
+          aux_afrac_x(i,j,k) = zero;
+      }
+    });
+
+    Box my_ybx(bx); my_ybx.growHi(1,1);
+    int ybx_lo = my_ybx.smallEnd(1);
+    int ybx_hi = my_ybx.bigEnd(1);
+    ParallelFor(my_ybx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+    {
+      if ((j == ybx_lo && aux_vfrac(i,j,k) < small_volfrac) ||
+          (j == ybx_hi && aux_vfrac(i,j-1,k) < small_volfrac) ||
+          (j > ybx_lo && j < ybx_hi &&
+          (aux_vfrac(i,j,k) < small_volfrac || aux_vfrac(i,j-1,k) < small_volfrac))) {
+          aux_afrac_y(i,j,k) = zero;
+      }
+    });
+
+    Box my_zbx(bx); my_zbx.growHi(2,1);
+    int zbx_lo = my_zbx.smallEnd(2);
+    int zbx_hi = my_zbx.bigEnd(2);
+    ParallelFor(my_zbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+    {
+      if ((k == zbx_lo && aux_vfrac(i,j,k) < small_volfrac) ||
+          (k == zbx_hi && aux_vfrac(i,j,k-1) < small_volfrac) ||
+          (k > zbx_lo && k < zbx_hi &&
+          (aux_vfrac(i,j,k) < small_volfrac || aux_vfrac(i,j,k-1) < small_volfrac))) {
+          aux_afrac_z(i,j,k) = zero;
+      }
+    });
+
+    ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+    {
+      if (aux_vfrac(i,j,k) < small_volfrac)
+      {
+        aux_vcent(i,j,k,0) = zero;
+        aux_vcent(i,j,k,1) = zero;
+        aux_vcent(i,j,k,2) = zero;
+
+        aux_fcent_x(i  ,j  ,k  ,0) = zero;
+        aux_fcent_x(i  ,j  ,k  ,1) = zero;
+        aux_fcent_x(i+1,j  ,k  ,0) = zero;
+        aux_fcent_x(i+1,j  ,k  ,1) = zero;
+
+        aux_fcent_y(i  ,j  ,k  ,0) = zero;
+        aux_fcent_y(i  ,j  ,k  ,1) = zero;
+        aux_fcent_y(i  ,j+1,k  ,0) = zero;
+        aux_fcent_y(i  ,j+1,k  ,1) = zero;
+
+        aux_fcent_z(i  ,j  ,k  ,0) = zero;
+        aux_fcent_z(i  ,j  ,k  ,1) = zero;
+        aux_fcent_z(i  ,j  ,k+1,0) = zero;
+        aux_fcent_z(i  ,j  ,k+1,1) = zero;
+
+        aux_barea(i,j,k) = zero;
+
+        aux_bcent(i,j,k,0) = zero;
+        aux_bcent(i,j,k,1) = zero;
+        aux_bcent(i,j,k,2) = zero;
+
+        aux_bnorm(i,j,k,0) = zero;
+        aux_bnorm(i,j,k,1) = zero;
+        aux_bnorm(i,j,k,2) = zero;
+
+        aux_flag(i,j,k).setCovered();
+      }
+
+      if (std::abs(aux_vcent(i,j,k,0)) < small_value) aux_vcent(i,j,k,0) = zero;
+      if (std::abs(aux_vcent(i,j,k,1)) < small_value) aux_vcent(i,j,k,1) = zero;
+      if (std::abs(aux_vcent(i,j,k,2)) < small_value) aux_vcent(i,j,k,2) = zero;
+      if (std::abs(aux_bcent(i,j,k,0)) < small_value) aux_bcent(i,j,k,0) = zero;
+      if (std::abs(aux_bcent(i,j,k,1)) < small_value) aux_bcent(i,j,k,1) = zero;
+      if (std::abs(aux_bcent(i,j,k,2)) < small_value) aux_bcent(i,j,k,2) = zero;
+    });
+
+    Box upper_slab = makeSlab(bx_grown, a_idim, bx.bigEnd(a_idim)+1);
+    Box bx_grown_1 = bx; bx_grown_1.grow(a_idim,1);
+    BoxList slab_diffList = boxDiff(upper_slab, bx_grown_1);
+
+    for (const Box& b : slab_diffList) {
+      ParallelFor(b, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+      {
+        IntVect iv(AMREX_D_DECL(i,j,k));
+        IntVect iv_nearest = iv;
+        for (int d=0; d<AMREX_SPACEDIM; ++d) {
+            iv_nearest[d] = Clamp(iv[d], bx_grown_1.smallEnd(d), bx_grown_1.bigEnd(d));
+        }
+        aux_afrac_x(iv) = aux_afrac_x(iv_nearest);
+      });
+    }
+
+  } // MFIter
+
+  m_volcent->FillBoundary(a_geom.periodicity());
+  for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+    m_areafrac[idim]->FillBoundary(a_geom.periodicity());
+    m_facecent[idim]->FillBoundary(a_geom.periodicity());
+  }
+  m_bndryarea->FillBoundary(a_geom.periodicity());
+  m_bndrycent->FillBoundary(a_geom.periodicity());
+  m_bndrynorm->FillBoundary(a_geom.periodicity());
+
+  for (MFIter mfi(*m_cellflags, false); mfi.isValid(); ++mfi) {
+
+    const Box& bx = mfi.validbox();
+    const Box domain = surroundingNodes(a_geom.Domain(), a_idim);
+
+    Array4<EBCellFlag> const& aux_flag  = m_cellflags->array(mfi);
+    Array4<Real>       const& aux_afrac_x = m_areafrac[0]->array(mfi);
+    Array4<Real>       const& aux_afrac_y = m_areafrac[1]->array(mfi);
+    Array4<Real>       const& aux_afrac_z = m_areafrac[2]->array(mfi);
+
+    ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+    {
+      EB2::build_cellflag_from_ap (i, j, k, aux_flag, aux_afrac_x, aux_afrac_y, aux_afrac_z);
+    });
+
+    bool l_periodic_x = a_geom.isPeriodic(0);
+    bool l_periodic_y = a_geom.isPeriodic(1);
+    bool l_periodic_z = a_geom.isPeriodic(2);
+
+    if (!l_periodic_x) {
+      const Box dom_grown = grow(grow(domain,1,1),2,1);
+      const Box bx_grown  = grow(grow(    bx,1,1),2,1);
+      const Box bx_face_x_lo = bx_grown & makeSlab(dom_grown,0,domain.smallEnd(0));
+      const Box bx_face_x_hi = bx_grown & makeSlab(dom_grown,0,domain.bigEnd(0));
+
+      ParallelFor(bx_face_x_lo, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+      {
+        for(int kk(-1); kk<=1; kk++) {
+        for(int jj(-1); jj<=1; jj++) {
+          aux_flag(i,j,k).setDisconnected(-1,jj,kk);
+        }}
+      });
+      ParallelFor(bx_face_x_hi, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+      {
+        for(int kk(-1); kk<=1; kk++) {
+        for(int jj(-1); jj<=1; jj++) {
+          aux_flag(i,j,k).setDisconnected( 1,jj,kk);
+        }}
+      });
+    }
+
+    if (!l_periodic_y) {
+      const Box dom_grown = grow(grow(domain,0,1),2,1);
+      const Box bx_grown  = grow(grow(    bx,0,1),2,1);
+      const Box bx_face_y_lo = bx_grown & makeSlab(dom_grown,1,domain.smallEnd(1));
+      const Box bx_face_y_hi = bx_grown & makeSlab(dom_grown,1,domain.bigEnd(1));
+
+      ParallelFor(bx_face_y_lo, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+      {
+        for(int kk(-1); kk<=1; kk++) {
+        for(int ii(-1); ii<=1; ii++) {
+          aux_flag(i,j,k).setDisconnected(ii,-1,kk);
+        }}
+      });
+      ParallelFor(bx_face_y_hi, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+      {
+        for(int kk(-1); kk<=1; kk++) {
+        for(int ii(-1); ii<=1; ii++) {
+          aux_flag(i,j,k).setDisconnected(ii, 1,kk);
+        }}
+      });
+    }
+
+    if (!l_periodic_z) {
+      const Box dom_grown = grow(grow(domain,0,1),1,1);
+      const Box bx_grown  = grow(grow(    bx,0,1),1,1);
+      const Box bx_face_z_lo = bx_grown & makeSlab(dom_grown,2,domain.smallEnd(2));
+      const Box bx_face_z_hi = bx_grown & makeSlab(dom_grown,2,domain.bigEnd(2));
+
+      ParallelFor(bx_face_z_lo, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+      {
+        for(int jj(-1); jj<=1; jj++) {
+        for(int ii(-1); ii<=1; ii++) {
+          aux_flag(i,j,k).setDisconnected(ii,jj,-1);
+        }}
+      });
+      ParallelFor(bx_face_z_hi, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+      {
+        for(int jj(-1); jj<=1; jj++) {
+        for(int ii(-1); ii<=1; ii++) {
+          aux_flag(i,j,k).setDisconnected(ii,jj, 1);
+        }}
+      });
+    }
+
+  } // MFIter
+
+  for (MFIter mfi(*m_cellflags, false); mfi.isValid(); ++mfi) {
+
+    const Box& bx = mfi.validbox();
+    const int ng_discon = amrex::min(m_cellflags->nGrow(), m_volfrac->nGrow());
+    const Box gbx = amrex::grow(bx, ng_discon-1);
+
+    Array4<EBCellFlag> const& aux_flag  = m_cellflags->array(mfi);
+    Array4<Real>       const& aux_vfrac = m_volfrac->array(mfi);
+
+    ParallelFor(gbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+    {
+      for(int kk(-1); kk<=1; kk++) {
+      for(int jj(-1); jj<=1; jj++) {
+      for(int ii(-1); ii<=1; ii++)
+      {
+        if (aux_vfrac(i+ii,j+jj,k+kk) == zero) {
+            aux_flag(i,j,k).setDisconnected(ii,jj,kk);
+        }
+      }}}
+    });
+
+    ParallelFor(gbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+    {
+        if (aux_vfrac(i,j,k)==zero) {
+            aux_flag(i,j,k).setCovered();
+        }
+    });
+  }
+
+  m_cellflags->FillBoundary(a_geom.periodicity());
+}
+
+void
+eb_aux_::
+copy_from (const eb_aux_& src)
+{
+  for (MFIter mfi(*m_cellflags, false); mfi.isValid(); ++mfi) {
+    Box const flag_bx = (*m_cellflags)[mfi].box();
+    Array4<EBCellFlag> const& dst_flag = m_cellflags->array(mfi);
+    Array4<EBCellFlag const> const& src_flag = src.m_cellflags->const_array(mfi);
+
+    ParallelFor(flag_bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+    {
+      dst_flag(i,j,k) = src_flag(i,j,k);
+    });
+  }
+
+  for (MFIter mfi(*m_volfrac, false); mfi.isValid(); ++mfi) {
+    Box const vfrac_bx = (*m_volfrac)[mfi].box();
+    Array4<Real> const& dst_vfrac = m_volfrac->array(mfi);
+    Array4<Real const> const& src_vfrac = src.m_volfrac->const_array(mfi);
+
+    ParallelFor(vfrac_bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+    {
+      dst_vfrac(i,j,k) = src_vfrac(i,j,k);
+    });
+  }
+
+  for (MFIter mfi(*m_volcent, false); mfi.isValid(); ++mfi) {
+    Box const vcent_bx = (*m_volcent)[mfi].box();
+    Array4<Real> const& dst_vcent = m_volcent->array(mfi);
+    Array4<Real const> const& src_vcent = src.m_volcent->const_array(mfi);
+
+    ParallelFor(vcent_bx, AMREX_SPACEDIM, [=] AMREX_GPU_DEVICE (int i, int j, int k, int n) noexcept
+    {
+      dst_vcent(i,j,k,n) = src_vcent(i,j,k,n);
+    });
+  }
+
+  for (MFIter mfi(*m_bndryarea, false); mfi.isValid(); ++mfi) {
+    Box const barea_bx = (*m_bndryarea)[mfi].box();
+    Array4<Real> const& dst_barea = m_bndryarea->array(mfi);
+    Array4<Real const> const& src_barea = src.m_bndryarea->const_array(mfi);
+
+    ParallelFor(barea_bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+    {
+      dst_barea(i,j,k) = src_barea(i,j,k);
+    });
+  }
+
+  for (MFIter mfi(*m_bndrycent, false); mfi.isValid(); ++mfi) {
+    Box const bcent_bx = (*m_bndrycent)[mfi].box();
+    Array4<Real> const& dst_bcent = m_bndrycent->array(mfi);
+    Array4<Real const> const& src_bcent = src.m_bndrycent->const_array(mfi);
+    Array4<Real> const& dst_bnorm = m_bndrynorm->array(mfi);
+    Array4<Real const> const& src_bnorm = src.m_bndrynorm->const_array(mfi);
+
+    ParallelFor(bcent_bx, AMREX_SPACEDIM, [=] AMREX_GPU_DEVICE (int i, int j, int k, int n) noexcept
+    {
+      dst_bcent(i,j,k,n) = src_bcent(i,j,k,n);
+      dst_bnorm(i,j,k,n) = src_bnorm(i,j,k,n);
+    });
+  }
+
+  for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+    for (MFIter mfi(*m_areafrac[idim], false); mfi.isValid(); ++mfi) {
+      Box const fab_bx = (*m_areafrac[idim])[mfi].box();
+      Array4<Real> const& dst_afrac = m_areafrac[idim]->array(mfi);
+      Array4<Real const> const& src_afrac = src.m_areafrac[idim]->const_array(mfi);
+
+      ParallelFor(fab_bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+      {
+        dst_afrac(i,j,k) = src_afrac(i,j,k);
+      });
+    }
+
+    for (MFIter mfi(*m_facecent[idim], false); mfi.isValid(); ++mfi) {
+      Box const fab_bx = (*m_facecent[idim])[mfi].box();
+      Array4<Real> const& dst_fcent = m_facecent[idim]->array(mfi);
+      Array4<Real const> const& src_fcent = src.m_facecent[idim]->const_array(mfi);
+
+      ParallelFor(fab_bx, AMREX_SPACEDIM-1, [=] AMREX_GPU_DEVICE (int i, int j, int k, int n) noexcept
+      {
+        dst_fcent(i,j,k,n) = src_fcent(i,j,k,n);
+      });
+    }
+  }
+}
+
+void
+eb_aux_::
+copy_boundary_from (const eb_aux_& src,
+                    int const& a_idim,
+                    Geometry const& a_geom)
+{
+  if (a_geom.isPeriodic(a_idim)) { return; }
+
+  for (MFIter mfi(*m_cellflags, false); mfi.isValid(); ++mfi) {
+    Box const& valid_bx = mfi.validbox();
+    Box const fab_bx = (*m_volfrac)[mfi].box();
+
+    Array4<EBCellFlag> const& dst_flag = m_cellflags->array(mfi);
+    Array4<EBCellFlag const> const& src_flag = src.m_cellflags->const_array(mfi);
+
+    Array4<Real> const& dst_vfrac = m_volfrac->array(mfi);
+    Array4<Real const> const& src_vfrac = src.m_volfrac->const_array(mfi);
+    Array4<Real> const& dst_vcent = m_volcent->array(mfi);
+    Array4<Real const> const& src_vcent = src.m_volcent->const_array(mfi);
+    Array4<Real> const& dst_barea = m_bndryarea->array(mfi);
+    Array4<Real const> const& src_barea = src.m_bndryarea->const_array(mfi);
+    Array4<Real> const& dst_bcent = m_bndrycent->array(mfi);
+    Array4<Real const> const& src_bcent = src.m_bndrycent->const_array(mfi);
+    Array4<Real> const& dst_bnorm = m_bndrynorm->array(mfi);
+    Array4<Real const> const& src_bnorm = src.m_bndrynorm->const_array(mfi);
+    Array<Array4<Real>,AMREX_SPACEDIM> dst_afrac;
+    Array<Array4<Real const>,AMREX_SPACEDIM> src_afrac;
+    Array<Array4<Real>,AMREX_SPACEDIM> dst_fcent;
+    Array<Array4<Real const>,AMREX_SPACEDIM> src_fcent;
+    for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+      dst_afrac[idim] = m_areafrac[idim]->array(mfi);
+      src_afrac[idim] = src.m_areafrac[idim]->const_array(mfi);
+      dst_fcent[idim] = m_facecent[idim]->array(mfi);
+      src_fcent[idim] = src.m_facecent[idim]->const_array(mfi);
+    }
+
+    auto copy_box = [=] (Box const& b)
+    {
+      if (!b.ok()) { return; }
+
+      ParallelFor(b, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+      {
+        dst_flag(i,j,k) = src_flag(i,j,k);
+        dst_vfrac(i,j,k) = src_vfrac(i,j,k);
+        dst_barea(i,j,k) = src_barea(i,j,k);
+      });
+
+      ParallelFor(b, AMREX_SPACEDIM, [=] AMREX_GPU_DEVICE (int i, int j, int k, int n) noexcept
+      {
+        dst_vcent(i,j,k,n) = src_vcent(i,j,k,n);
+        dst_bcent(i,j,k,n) = src_bcent(i,j,k,n);
+        dst_bnorm(i,j,k,n) = src_bnorm(i,j,k,n);
+      });
+
+      for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+        ParallelFor(b, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+        {
+          dst_afrac[idim](i,j,k) = src_afrac[idim](i,j,k);
+        });
+
+        ParallelFor(b, AMREX_SPACEDIM-1, [=] AMREX_GPU_DEVICE (int i, int j, int k, int n) noexcept
+        {
+          dst_fcent[idim](i,j,k,n) = src_fcent[idim](i,j,k,n);
+        });
+      }
+    };
+
+    Box lo_valid = makeSlab(valid_bx, a_idim, valid_bx.smallEnd(a_idim));
+    Box hi_valid = makeSlab(valid_bx, a_idim, valid_bx.bigEnd(a_idim));
+
+    Box lo_ghost(fab_bx);
+    lo_ghost.setBig(a_idim, valid_bx.smallEnd(a_idim)-1);
+
+    Box hi_ghost(fab_bx);
+    hi_ghost.setSmall(a_idim, valid_bx.bigEnd(a_idim)+1);
+
+    copy_box(lo_valid);
+    copy_box(hi_valid);
+    copy_box(lo_ghost);
+    copy_box(hi_ghost);
+  }
+}
 
 void
 eb_aux_::

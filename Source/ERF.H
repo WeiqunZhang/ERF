@@ -17,6 +17,7 @@
 #include <AMReX_ParmParse.H>
 #include <AMReX_MultiFabUtil.H>
 #include <AMReX_FillPatchUtil.H>
+#include <AMReX_FArrayBox.H>
 #include <AMReX_VisMF.H>
 #include <AMReX_PhysBCFunct.H>
 #include <AMReX_YAFluxRegister.H>
@@ -546,6 +547,7 @@ public:
 #endif
 
     std::string pp_prefix {"erf"};
+    bool m_use_amrex_staggered_eb = false;
 
     void fill_from_bndryregs (const amrex::Vector<amrex::MultiFab*>& mfs,
                               amrex::Real time);
@@ -969,6 +971,8 @@ private:
 
     amrex::Vector<amrex::Vector<amrex::Real>> stretched_dz_h;
     amrex::Vector<amrex::Gpu::DeviceVector<amrex::Real>> stretched_dz_d;
+    amrex::Vector<std::unique_ptr<amrex::FArrayBox>> terrain_height_fab;
+    amrex::Vector<std::unique_ptr<amrex::FArrayBox>> building_height_fab;
 
     amrex::Vector<amrex::MultiFab> base_state;
     amrex::Vector<amrex::MultiFab> base_state_new;
